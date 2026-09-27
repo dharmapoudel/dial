@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dial — Settings</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="settings">
+    <header>
+      <h1>Dial</h1>
+      <p class="sub">Co-pilot DJ settings</p>
+    </header>
+    <section class="card">
+      <label class="row">
+        <span>
+          <strong>DJ voice replies</strong>
+          <small>The DJ speaks its replies out loud.</small>
+        </span>
+        <input type="checkbox" id="cfg-dj_voice">
+      </label>
+      <label class="row">
+        <span>
+          <strong>Haptic confirmation ticks</strong>
+          <small>Short vibration when the DJ applies a change.</small>
+        </span>
+        <input type="checkbox" id="cfg-haptics">
+      </label>
+    </section>
+    <p class="hint">Changes apply the next time Dial starts on the Car Thing.</p>
+    <p class="status" id="status" role="status"></p>
+  </main>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
