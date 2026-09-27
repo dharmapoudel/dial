@@ -158,6 +158,38 @@ async function boot() {
   const cfg = deps.config;
   try { haptics.setEnabled && haptics.setEnabled(cfg.haptics !== false); } catch { /* no-op */ }
 
+  // 4b · phone audio (the Car Thing has no speaker; the phone plays bundle MP3s)
+  let phone = null;
+  try {
+    const phoneMod = await safeImportLiteral(import('./device/phone.js'));
+    if (phoneMod && phoneMod.initPhone) {
+      phone = phoneMod.initPhone(() => (client && client.rawClient ? client.rawClient() : null));
+      phone.onSnapshot((msg) => {
+        try { console.log('[dial] phone snapshot', JSON.stringify(msg).slice(0, 220)); } catch {}
+      });
+    }
+  } catch { phone = null; }
+  // Probe build: only these tracks have rendered MP3s in public/audio/.
+  const PHONE_TRACKS = new Set(['t01', 't02', 't03', 't04', 't05', 't06']);
+  let phoneTrackId = null;
+  let phoneWantsPlaying = false;
+  function syncPhone() {
+    if (!phone) return;
+    const t = curTrack();
+    const wantPlaying = !!(S().playing && t && PHONE_TRACKS.has(t.id));
+    const wantId = wantPlaying ? t.id : null;
+    if (wantPlaying === phoneWantsPlaying && wantId === phoneTrackId) return;
+    phoneWantsPlaying = wantPlaying;
+    phoneTrackId = wantId;
+    if (wantPlaying) {
+      phone.playTrack(t).then((url) => {
+        try { console.log(url ? `[dial] phone playing ${url}` : `[dial] phone unavailable for ${t.id}`); } catch {}
+      });
+    } else {
+      try { phone.pause(); } catch { /* no-op */ }
+    }
+  }
+
   // 5 · store + drives
   const store = createStore();
   deps.DRIVES = (libMod && libMod.DRIVES) || store.getState().drives || [];
@@ -203,6 +235,7 @@ async function boot() {
   function togglePlay() {
     try { engine.toggle(); } catch { /* engine fault */ }
     store.update({ playing: !S().playing });
+    syncPhone();
     try { haptics.tick(); } catch { /* no-op */ }
   }
 
@@ -254,6 +287,7 @@ async function boot() {
     if (!S().playing) {
       try { engine.toggle(); } catch { /* engine fault */ }
       store.update({ playing: true });
+      syncPhone();
     }
     try { haptics.confirm(); } catch { /* no-op */ }
   }
@@ -287,9 +321,11 @@ async function boot() {
       if (cmd === 'next') {
         try { engine.next(); } catch { /* engine fault */ }
         store.update({ queueIndex: Math.min(q.length - 1, S().queueIndex + 1) });
+        syncPhone();
       } else if (cmd === 'prev') {
         try { engine.prev(); } catch { /* engine fault */ }
         store.update({ queueIndex: Math.max(0, S().queueIndex - 1) });
+        syncPhone();
       }
       try { haptics.tick(); } catch { /* no-op */ }
     },

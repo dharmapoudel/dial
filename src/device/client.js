@@ -135,5 +135,10 @@ export function initClient(handlers = {}) {
     client = null;
   }
 
-  return { pushToTalk, volumeUp, volumeDown, getConfig, connected, dispose };
+  /** The underlying BridgethingClient (for surfaces like player). Null when offline. */
+  function rawClient() {
+    return client;
+  }
+
+  return { pushToTalk, volumeUp, volumeDown, getConfig, connected, dispose, rawClient };
 }

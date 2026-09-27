@@ -52,6 +52,122 @@ function midiToFreq(m) {
   return 440 * Math.pow(2, (m - 69) / 12);
 }
 
+/**
+ * Generative pad voice — module-level so both the realtime engine and the
+ * offline renderer share the exact same deterministic construction.
+ * buildVoice(track, ac, dest) where ac is any BaseAudioContext and dest is
+ * the node to connect the voice output to. Deterministic per track.seed.
+ */
+function buildVoice(track, ac, dest) {
+  const rng = mulberry32(track.seed >>> 0);
+  const { midi, minor } = keyToMidi(track.key);
+  const third = minor ? 3 : 4;
+  const chord = [0, third, 7, 12, 12 + third].map((iv) => midiToFreq(midi + iv - 12));
+
+  const out = ac.createGain();
+  out.gain.value = 0;
+  const filter = ac.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 700 + rng() * 500;
+  filter.Q.value = 0.6;
+  filter.connect(out);
+  out.connect(dest);
+
+  // Slow LFO breathing on the filter cutoff — the "liquid" feel.
+  const lfo = ac.createOscillator();
+  lfo.frequency.value = 0.05 + rng() * 0.06;
+  const lfoGain = ac.createGain();
+  lfoGain.gain.value = 220;
+  lfo.connect(lfoGain);
+  lfoGain.connect(filter.frequency);
+  lfo.start();
+
+  const oscs = [];
+  for (const f of chord) {
+    for (const det of [-6, 5]) {
+      const o = ac.createOscillator();
+      o.type = rng() < 0.6 ? 'sawtooth' : 'triangle';
+      o.frequency.value = f;
+      o.detune.value = det + (rng() * 8 - 4);
+      const g = ac.createGain();
+      g.gain.value = 0.028; // quiet per-voice; chord sums to a soft pad
+      o.connect(g);
+      g.connect(filter);
+      o.start();
+      oscs.push(o);
+    }
+  }
+
+  const t = ac.currentTime;
+  out.gain.cancelScheduledValues(t);
+  out.gain.setValueAtTime(0, t);
+  out.gain.linearRampToValueAtTime(1, t + 1.2); // fade in
+
+  let stopped = false;
+  return {
+    gain: out,
+    stop(fadeMs = 800) {
+      if (stopped) return;
+      stopped = true;
+      const now = ac.currentTime;
+      const fade = fadeMs / 1000;
+      out.gain.cancelScheduledValues(now);
+      out.gain.setValueAtTime(out.gain.value, now);
+      out.gain.linearRampToValueAtTime(0, now + fade);
+      const killAt = now + fade + 0.1;
+      for (const o of oscs) { try { o.stop(killAt); } catch {} }
+      try { lfo.stop(killAt); } catch {}
+    },
+    /** Hard stop at an absolute context time (for offline renders). */
+    stopAt(when) {
+      if (stopped) return;
+      stopped = true;
+      for (const o of oscs) { try { o.stop(when); } catch {} }
+      try { lfo.stop(when); } catch {}
+    },
+  };
+}
+
+/** Soft kick thump — module-level, shared by realtime and offline. */
+function schedulePulseAt(ac, dest, when) {
+  const o = ac.createOscillator();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(72, when);
+  o.frequency.exponentialRampToValueAtTime(44, when + 0.12);
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.16, when);
+  g.gain.exponentialRampToValueAtTime(0.001, when + 0.22);
+  o.connect(g);
+  g.connect(dest);
+  o.start(when);
+  o.stop(when + 0.3);
+}
+
+/**
+ * Render a track to an AudioBuffer offline (build-time phone audio).
+ * Deterministic: same seed -> same music as the realtime engine.
+ */
+export async function renderTrack(track, seconds = 150) {
+  const OC = typeof OfflineAudioContext !== 'undefined' ? OfflineAudioContext : null;
+  if (!OC) throw new Error('OfflineAudioContext unavailable');
+  const sampleRate = 44100;
+  const ac = new OC(2, Math.ceil(seconds * sampleRate), sampleRate);
+  const master = ac.createGain();
+  master.gain.value = 0.8;
+  master.connect(ac.destination);
+  const voice = buildVoice(track, ac, master);
+  const interval = 60 / (track.bpm || 100);
+  for (let t = 0.08; t < seconds - 1; t += interval) {
+    schedulePulseAt(ac, master, t);
+  }
+  // Fade out over the last 4 seconds so the file ends cleanly.
+  const fadeStart = Math.max(0, seconds - 4);
+  master.gain.setValueAtTime(0.8, fadeStart);
+  master.gain.linearRampToValueAtTime(0.0001, seconds - 0.05);
+  voice.stopAt(seconds);
+  return ac.startRendering();
+}
+
 /** Accept track objects or track ids; drop anything unresolvable. */
 function normalizeQueue(queue) {
   const out = [];
@@ -124,71 +240,6 @@ export function init() {
     return ensureCtx();
   }
 
-  // ---- generative pad voice -------------------------------------------
-
-  function buildVoice(track) {
-    const rng = mulberry32(track.seed >>> 0);
-    const { midi, minor } = keyToMidi(track.key);
-    const third = minor ? 3 : 4;
-    const chord = [0, third, 7, 12, 12 + third].map((iv) => midiToFreq(midi + iv - 12));
-
-    const out = ctx.createGain();
-    out.gain.value = 0;
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 700 + rng() * 500;
-    filter.Q.value = 0.6;
-    filter.connect(out);
-    out.connect(master);
-
-    // Slow LFO breathing on the filter cutoff — the "liquid" feel.
-    const lfo = ctx.createOscillator();
-    lfo.frequency.value = 0.05 + rng() * 0.06;
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = 220;
-    lfo.connect(lfoGain);
-    lfoGain.connect(filter.frequency);
-    lfo.start();
-
-    const oscs = [];
-    for (const f of chord) {
-      for (const det of [-6, 5]) {
-        const o = ctx.createOscillator();
-        o.type = rng() < 0.6 ? 'sawtooth' : 'triangle';
-        o.frequency.value = f;
-        o.detune.value = det + (rng() * 8 - 4);
-        const g = ctx.createGain();
-        g.gain.value = 0.028; // quiet per-voice; chord sums to a soft pad
-        o.connect(g);
-        g.connect(filter);
-        o.start();
-        oscs.push(o);
-      }
-    }
-
-    const t = ctx.currentTime;
-    out.gain.cancelScheduledValues(t);
-    out.gain.setValueAtTime(0, t);
-    out.gain.linearRampToValueAtTime(1, t + 1.2); // fade in
-
-    let stopped = false;
-    return {
-      gain: out,
-      stop(fadeMs = 800) {
-        if (stopped) return;
-        stopped = true;
-        const now = ctx.currentTime;
-        const fade = fadeMs / 1000;
-        out.gain.cancelScheduledValues(now);
-        out.gain.setValueAtTime(out.gain.value, now);
-        out.gain.linearRampToValueAtTime(0, now + fade);
-        const killAt = now + fade + 0.1;
-        for (const o of oscs) { try { o.stop(killAt); } catch {} }
-        try { lfo.stop(killAt); } catch {}
-      },
-    };
-  }
-
   // ---- pulse scheduler (lookahead) -------------------------------------
 
   function pulseInterval() {
@@ -196,18 +247,8 @@ export function init() {
   }
 
   function schedulePulse(when) {
-    // Soft thump: sine drop + gentle noise tick.
-    const o = ctx.createOscillator();
-    o.type = 'sine';
-    o.frequency.setValueAtTime(72, when);
-    o.frequency.exponentialRampToValueAtTime(44, when + 0.12);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.16, when);
-    g.gain.exponentialRampToValueAtTime(0.001, when + 0.22);
-    o.connect(g);
-    g.connect(master);
-    o.start(when);
-    o.stop(when + 0.3);
+    // Soft thump: sine drop + gentle noise tick (shared audio builder).
+    schedulePulseAt(ctx, master, when);
 
     // Fire beat callbacks aligned to the audible pulse.
     const delayMs = Math.max(0, (when - ctx.currentTime) * 1000);
@@ -271,7 +312,7 @@ export function init() {
     if (ensureCtx()) {
       wake();
       const old = voice;
-      voice = buildVoice(track);
+      voice = buildVoice(track, ctx, master);
       if (old) old.stop(fadeMs);
       current = track;
       startedAtCtx = ctx.currentTime;
