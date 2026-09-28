@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+- New app icon (user pick): dark tile with teal Groove Dial mark, keeping the
+  protruding detent nub from the original icon.
+
 ## 0.1.1
 - Phone audio probe: the Car Thing has no speaker, so Dial now renders its
   generative tracks to MP3 at build time (OfflineAudioContext, bit-identical
